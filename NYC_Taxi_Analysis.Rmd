@@ -1,0 +1,360 @@
+---
+title: "NYC Taxi Trip Data Analysis"
+author: "Gurkanwar Singh"
+
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE,
+                      message = FALSE, 
+                      cache = TRUE)
+```
+
+This is a brief analysis of the trip data of green taxis operating in NYC. I will use data collected by the New York City Taxi and Limousine commission about “Green” Taxis. Green Taxis (as opposed to yellow ones) are taxis that are not allowed to pick up passengers inside of the densely populated areas of Manhattan. I will use the data from September 2015. The dataset is accessible from the NYC Taxi and Limousine trip record data: (http://www.nyc.gov/html/tlc/html/about/trip_record_data.shtml)
+
+## Downloading the dataset
+
+Let's download the data and print the number of rows and columns. 
+
+```{r }
+#install.packages("tidyverse") 
+library(tidyverse)
+library(lubridate)
+
+data <- read.csv("https://s3.amazonaws.com/nyc-tlc/trip+data/green_tripdata_2015-09.csv")
+
+paste("Number of rows:",nrow(data))
+paste("Number of columns:", ncol(data))
+
+```
+
+## Trip Distance
+
+Following is a frequency histogram of the whole trip data
+
+```{r }
+ 
+ggplot(data, aes(Trip_distance)) + geom_histogram(binwidth = 2, color="black",
+       fill="lightblue") + labs(x="Trip distance", y="Count")
+
+
+
+```
+
+Since the frequency is too high for some values, let's transform the frequency (y axis) to log scale. Let's limit the trip distance range to 100 miles to get a better view.
+
+```{r }
+
+trip_data <- subset(data,Trip_distance>0) 
+
+ggplot(trip_data, aes(Trip_distance)) + geom_histogram(binwidth = 2, color="black",
+       fill="lightblue") + scale_y_continuous(trans='log2') + xlim(0,100) + labs(x="Trip distance", y="Count")
+
+```
+
+
+We see that the distribution is skewed to the right. The mode is less than the median which is less than the mean. There are some values of Trip distance (before 75 miles) which have unusually low frequency and after 75 miles which have high frequency. These can be treated as outliers. Since the distribution is not normal meaning that the Trip Distance is not randomly distributed. 
+
+### Mean Trip Distance
+
+Let's plot the Mean and Median trip distance grouped by hour of the day
+
+```{r }
+
+trip_data <- trip_data %>% mutate(Pickup_date=as.POSIXct(strptime(lpep_pickup_datetime, 
+    "%Y-%m-%d %H:%M:%S")),Dropoff_date=as.POSIXct(strptime(Lpep_dropoff_datetime,      "%Y-%m-%d %H:%M:%S")))
+
+trip_data <- trip_data %>% mutate(Pickup_hour = hour(Pickup_date))
+
+Mean_Median_dist<- trip_data %>% group_by(Pickup_hour) %>% 
+  summarize(Mean_dist = mean(Trip_distance), Median_dist = median(Trip_distance))
+
+tidy <- Mean_Median_dist %>% gather(key="Statistic",value="Value",-Pickup_hour)
+
+print(Mean_Median_dist)
+
+ggplot(tidy, aes(Pickup_hour,Value)) +geom_line(aes(color=Statistic))
+
+
+```
+
+
+We observe that there are 2 peaks - one in the morning around 5 am and one in the evening around 10 pm, though the evening peak is shorter. This may be because more people commute to work via taxi in the morning because they don't want to get late and the prefer public transport while returning back home in the evening.
+
+## Trips originating/terminating at one of the NYC airports
+
+According to the Data Dictionary, RateCodeID 2 and 3 stand for 'JFK' and 'Newark' airports respectively. We can use this to find the average trip distances to/from airports.
+
+```{r }
+
+airport_trips <- subset(trip_data, RateCodeID == 2 | RateCodeID == 3)
+
+paste("Number of trips originating/terminating at NYC airports:", nrow(airport_trips))
+paste("Average fare of trips originating/terminating at NYC airports:", mean(airport_trips$Fare_amount))
+
+
+```
+
+Let's do an analysis of distribution of trip distance and distribution of number of trips by hour of the day.
+
+
+```{r }
+
+ggplot(airport_trips, aes(Trip_distance)) + geom_histogram(binwidth = 2, color="black", fill="lightblue") + #scale_y_continuous(trans='log2') + 
+  xlim(0,50) + labs(x="Trip distance", y="Count")
+
+
+```
+
+There is a sharp peak in Trip distance at around 18 miles. This most probably corresponds to the distance between Manhattn and JFK. The second peakat 20 miles might correspond to the average distance between Newark airport and Manhattan.
+
+Airport trips grouped by pickup hour:
+
+```{r }
+
+airport_trips_hr <- airport_trips %>% group_by(Pickup_hour) %>% 
+  summarize(num_trips = n())
+
+print(airport_trips_hr)
+
+ggplot(airport_trips_hr, aes(Pickup_hour,num_trips)) + geom_line() +
+  ggtitle("Airport trips by hour")
+
+
+```
+
+We see that the number of aiport trips peak at around 3 pm meaning there might be lot of flights landing or departing at that time for which people take taxis. The curve reaches a low at around 2 am meaning there are less people riding to/from airport at that time.
+
+## Tip as a percentage of Total Fare
+
+### Derived variable for tip as a percentage of the total fare
+
+Here I am calculating tip percentage as a proportion of the Total amount
+
+```{r }
+
+trip_data <- trip_data %>% mutate(Tip_percentage = 100*Tip_amount/Total_amount)
+
+paste(summary(trip_data$Tip_percentage))
+```
+
+## Predictive model for tip as a percentage of the total fare
+
+To build the predictive model, I follow the following 4 steps:
+
+1) Data Cleaning
+2) Exploratory Data Analysis
+3) Feature Engineering
+4) Model
+
+### 1. Data Cleaning
+
+There was some cleaning of the data requiredas there were some variables with missing values: 
+
+1. "Ehail_fee" variable was dropped because 99% of the values are missing
+2. "RateCodeID" had some values as 99. Those were replaced by 1, which is the most frequently occuring value
+3. Some transaction had a negative value of "Extra", which was recoded to 0 (most frequent value)
+4. Some missing values in "Trip_type" were replaced by 1 (most frequent)
+5. Some values in Total_amount, Fare_amount, improvement_surcharge, Tip_amount were negative. Their values were replaced by their absolute values. 
+
+
+```{r }
+
+getmode <- function(v) {
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+trip_data$RateCodeID[trip_data$RateCodeID>6] <- getmode(trip_data$RateCodeID)
+
+trip_data$Trip_type[is.na(trip_data$Trip_type)] <- 1
+
+trip_data$Extra[trip_data$Extra<0] <- 0
+
+x <- trip_data$Total_amount[trip_data$Total_amount<0]
+trip_data$Total_amount[trip_data$Total_amount<0] <- abs(x)
+
+x <- trip_data$Fare_amount[trip_data$Fare_amount<0]
+trip_data$Fare_amount[trip_data$Fare_amount<0] <- abs(x)
+
+x <- trip_data$improvement_surcharge[trip_data$improvement_surcharge<0]
+trip_data$improvement_surcharge[trip_data$improvement_surcharge<0] <- abs(x)
+
+x <- trip_data$Tip_amount[trip_data$Tip_amount<0]
+trip_data$Tip_amount[trip_data$Tip_amount<0] <- abs(x)
+
+
+
+
+
+
+```
+
+### 2. Exploratory Data Analysis
+
+Most of this part is already covered in the above exploratory analysis. Let's do an analysis of Tip_percentage as a function of Fare_amount.
+
+
+```{r }
+
+ggplot(trip_data, aes(Fare_amount,Tip_percentage)) + geom_point(aplha = 0.3, color="Blue") + ylim(0,100)
+
+```
+
+We can infer that the density is maximum for regions where Fare Amount is low and Tip percentage is also low. As the Fare amount increases, Tip percentage is generally decreasing with values of 25% and 20% for high Fare Amounts.
+
+### 3. Feature Engineering
+
+Let's create some features from the variables, that can help us in the model.
+
+1. week_day: The number of the day in the week
+2. month_day: The number of day in the month
+3. Trip_duration: The time it takes to complete the trip. Difference of Dropoff time (or Date) and Pickup time (or Date)
+4. Trip_speed = Average speed of a trip during its duration.
+5. IsTip: 1 or 0 depending on whether Tip given or not
+
+```{r }
+
+trip_data <- trip_data %>% mutate(week_day = wday(Pickup_date,label=FALSE), 
+  month_day = mday(Pickup_date), 
+  Trip_duration = as.numeric(difftime(Dropoff_date,Pickup_date)),
+  Trip_speed = Trip_distance/(Trip_duration/3600), IsTip = ifelse(Tip_amount>0,1,0))
+
+trip_data <- subset(trip_data,Trip_duration>0)
+
+```
+
+### 4. Model
+
+
+I have used all the variables as predictor variables except those that are dropped as shown in the code (in data drame `drop`). I have randomly sampled 100000 rows from the input dataset as my machine could not handle much more data processing than this (also because of lack of time). I split the 100000 rows data into 70% Training set and 30% Test set. I have used the Random Forest Regression model to predict Tip percentage based on the predictor variables. The number of trees is chosen at 200. (Can be checked for optimum value)
+
+```{r }
+
+#install.packages("randomForest")
+library("randomForest")
+
+#drop unnecessary variables
+drop <- c("Tip_amount","Tip_percentage","lpep_pickup_datetime",
+          "Lpep_dropoff_datetime","Pickup_date","Dropoff_date","Ehail_fee")
+
+#create random sample of 100000 rows from input
+sample <- trip_data[sample(nrow(trip_data),100000),]
+df <- sample[,!(names(trip_data) %in% drop)]
+
+#separate out Trip_percentage column
+y_tr <- sample[,30]
+y_tr[is.na(y_tr)] <- 0 #replace NA values by 0
+y_tr[y_tr<0] <- 0  # replace negative values by 0
+
+#split sample into 70% train and 30% test
+x_train <- df[1:70000,]
+x_test <- df[70001:100000,]
+y_train <- y_tr[1:70000]
+y_test <- y_tr[70001:100000]
+
+x <- cbind(x_train,y_train)
+x[is.na(x)] <- 0 #replace any remaining NA values by 0
+
+#apply model
+model <- randomForest(y_train ~ .,x,ntree=200, mtry=7) 
+print(model)
+
+plot(model) #plot of RMSE
+varImpPlot(model) #Plotting variable importance
+
+
+```
+
+Since the R-squared is 1, it explains a all of the variance. 
+
+From the Variable Importance plot, we see that IsTip, Payment_type, Total_amount and Fare_amount are the most important predictors. Note here the optimum value of number of predictors sampled for spliting at each node (mtry) is 7. This can also be checked for optimum value by running Random Forest for number of parameters 1 to all.
+
+Now that our model is ready (with aceptable accuracy), we can make predictions.
+
+```{r }
+
+predictions <- predict(model,x_test)
+test_mse = mean((y_test-predictions)^2)
+
+print(test_mse)
+```
+
+We see that test MSE has very low value. This means that the model is performing well and the predicted Tip percentage are mostly accurate.
+
+## Further Analysis
+
+### Trip Speed
+
+We already dved a variable representing the average speed over the course of a trip: Trip_speed. It was calculated as Trip_speed (mph) = Trip_distance/(Trip_duration/60).
+
+Creating a variable week for The week of the month
+
+```{r }
+
+trip_data <- trip_data %>% mutate(week = ceiling(day(Pickup_date) / 7))
+
+speed_week <- trip_data %>% group_by(week) %>% summarize(Avg_speed_week = mean(Trip_speed))
+
+print(speed_week)
+
+```
+
+Here the Avg_speed_week is in mph. We see there is a difference among the Average speeds of the weeks.
+
+Let's do a t-test to see whether the mean speeds are significantly different among the weeks of the month.
+
+
+```{r }
+
+Week1=trip_data$Trip_speed[trip_data$week==1]
+Week2=trip_data$Trip_speed[trip_data$week==2]
+Week3=trip_data$Trip_speed[trip_data$week==3]
+Week4=trip_data$Trip_speed[trip_data$week==4]
+Week5=trip_data$Trip_speed[trip_data$week==5]
+
+Weeks <- list(as.vector(Week1),
+              as.vector(Week2),
+              as.vector(Week3),
+              as.vector(Week4),
+              as.vector(Week5))
+
+p_values = matrix(, nrow = 5, ncol = 5)
+
+#filling the matrix p_values
+for (i in 1:5){
+  for (j in 1:5){
+    p_values[i,j] = t.test(Weeks[[i]],Weeks[[j]])$p.value
+  }
+}
+
+print(p_values)
+```
+
+
+We can see p-values of pairs of most weeks (eg.Week 1 and 2) is small so that we can reject the null hypotheses that the mean speeds among the weeks are same and conclude that they are different. This means the speeds are dependent on the week of the month. This maybe because of different events happening in different weeks of September.
+
+Let's aggregate Trip_speed by Pickup_hour 
+
+
+```{r }
+
+Avg_speed_hr <- trip_data %>% group_by(Pickup_hour) %>% 
+  summarize(Avg_speed_hr = mean(Trip_speed))
+
+ggplot(Avg_speed_hr, aes(Pickup_hour, Avg_speed_hr)) + geom_line()
+
+```
+
+The average speed peaks at 5 am meaning the taxis are speeding the most at morning hours. We can hypothize that this is because there is not a lot of traffic at that hour and so the drivers drive the taxi at high speed. It seems the traffic is maximum at around 2 pm so the average of speeds is least.
+
+
+
+Code References:
+
+https://www.tutorialspoint.com/r/r_mean_median_mode.htm 
+

@@ -1,4 +1,4 @@
-This is a brief analysis of the trip data of green taxis operating in NYC. The exploratory data analysis, model building and predictions are done in R. 
+This is a brief analysis of the trip data of green taxis operating in NYC. The exploratory data analysis, model building and predictions of Tip percentage in a trip are done in R. 
 
 The analysis can be found at [NYC Taxi Data Analysis](https://s3.amazonaws.com/gurkanwar/NYC_Taxi_Analysis.html)
 
